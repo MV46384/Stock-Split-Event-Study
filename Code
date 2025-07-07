@@ -1,0 +1,340 @@
+libname project"/home/u64132952/sasuser.v94/FIN 557/project";
+
+proc import datafile="/home/u64132952/sasuser.v94/FIN 557/project/ff_daily.csv"
+out=project.ff_daily /*event.index_returns*/
+DBMS=csv
+replace;
+GETNAMES=YES;
+run;
+
+proc means data=project.ff_daily n min max;
+  var date;
+  run;
+
+
+proc contents data=project.ff_daily;
+run;
+
+proc means data=project.ff_daily n min max mean;
+  var 'Mkt-RF'n RF;
+run;
+
+proc print data=project.ff_daily(obs=10);
+run;
+
+
+proc import datafile="/home/u64132952/sasuser.v94/FIN 557/project/stock_daily.csv"
+out=project.sdaily /*event.returns*/
+DBMS=csv
+replace;
+GETNAMES=yes;
+run;
+
+proc print data=project.sdaily(obs=10);
+run; 
+
+proc contents data=project.sdaily;
+run;
+
+proc means data=project.sdaily n min max mean;
+  var dlyret;
+  run;
+
+proc means data=sdaily_fixed n min max mean;
+  var dlyret;
+run;
+
+proc means data=project.sdaily n min max mean ;
+  var yyyymmdd;
+  run;
+
+
+
+
+proc import datafile="/home/u64132952/sasuser.v94/FIN 557/project/stock_splits.csv"
+out=project.ssplits /*event.events*/
+DBMS=csv
+replace;
+GETNAMES=yes;
+run;
+
+
+proc means data=project.ssplits n min max mean ;
+  var disdeclaredt;
+  format disdeclaredt mmddyy10.;
+  run;
+  
+proc print data=project.ssplits(obs=10) ;
+  run;
+
+
+/* for getting ending and beginning dates*/
+
+proc means data=project.ssplits n min max mean;
+  var disdeclaredt;
+  format disdeclaredt mmddyy10.;
+  output out=summary_stats min= min_disdeclaredt max= max_disdeclaredt mean= mean_disdeclaredt;
+run;
+
+proc print data=summary_stats; 
+  format min_disdeclaredt max_disdeclaredt mmddyy10.;
+run;
+proc contents data=project.ssplits;
+run;
+
+
+
+/*Cleaning FF3 data*/
+
+data ffdaily_1; /*event.index_returns2*/
+    set project.ff_daily;
+    sas_date = input(put(Date, 8.), yymmdd8.);  /* Convert number to string, then to date */
+    format sas_date mmddyy10.;
+    drop Date;
+    rename sas_date = Date;
+    rename 'Mkt-RF'n = Mkt_RF;
+    
+run;
+
+data ffdaily_2;
+set ffdaily_1;
+Mkt=Mkt_RF+RF;
+format Mkt 8.4;
+run;
+
+proc print data=ffdaily_1;
+  var Date RF;
+  format RF 8.4;   /* four decimal places */
+run;
+
+
+proc contents data=ffdaily_2;
+run;
+
+/*Cleaning stock returns data*/
+
+data sdaily_fixed;/*event.returns2*/
+set project.sdaily;
+sas_date = input(put(yyyymmdd, 8.), yymmdd8.); /* convert to SAS date */
+format sas_date mmddyy10.; 
+drop  yyyymmdd;
+format dlycaldt mmddyy10.;
+informat dlycaldt mmddyy10.;
+if dlyret in (777, 999, -99) then dlyret = .;
+dlyret = dlyret * 100;
+run;
+
+
+proc contents data=sdaily_fixed;
+run;
+
+
+
+/*Cleaning Split data*/
+
+data split_events; /*event.events2*/
+set project.ssplits; 
+event_date = disdeclaredt;  /* Use the declared date as the event date */
+format event_date mmddyy10.;
+run;
+
+proc contents data=split_events;
+run;
+
+/*Merging Stocks return with Market return*/
+
+proc sql;
+    create table merged_returns as /*event.returns_with_mkt*/
+    select a.*, b.Mkt,b.Date
+    from sdaily_fixed  as a 
+    left join ffdaily_2 as b
+    on a.sas_date = b.Date;
+quit;
+/*Merging the above table with Split event*/
+
+proc print data= merged_returns(obs=10);
+run;
+
+proc sql;
+    create table merged_returns_2 as /*event.returns_events*/
+    select r.*,
+    e.disfacshr,
+    e.disexdt,
+    e.event_date
+    from merged_returns  as r
+    left join split_events as e
+    on r.permno = e.permno;
+quit;
+
+proc print data=merged_returns_2 (obs=10);
+where event_date is not missing;
+run;
+
+data final_merged;/*event.merged_event_return*/
+  set merged_returns_2;
+  where event_date is not missing;
+run;
+
+/* Drop any rows with missing DLYRET or Mkt */
+data work.filtered_1;
+  set final_merged;
+  /* delete rows where either return is missing */
+  if missing(dlyret) or missing(Mkt) then delete;
+run;
+
+proc sort data=work.filtered_1;
+  by permno event_date date;
+run;
+
+proc print data=work.filtered_1;
+run;
+
+data data_comp;
+    set work.filtered_1;
+    relday = date - event_date;
+    if -30 <= relday <= 30;
+run;
+
+proc sql;
+ create table overlapping_events as
+ select a.permno,
+ a.event_date as event_date1,
+ b.event_date as event_date2,
+ abs(a.event_date-b.event_date) as day_gap
+ from split_events as a
+ inner join split_events as b
+ on a.permno=b.permno and a.event_date<b.event_date
+ where calculated day_gap <=60;
+quit;
+
+data data_comp1;
+    set data_comp;
+    if date<event_date then before=1;
+    else before=0;
+run;
+
+proc sort data=data_comp1;
+    by permno event_date;
+run;
+
+
+proc means data=data_comp1 noprint;
+by permno event_date;
+output out=data_comp_2 sum(before)=bef_sum;
+run;
+
+ 
+
+proc sql;
+    create table data_comp_3 as /*work.temp3*/
+    select a.*, b.bef_sum
+    from  data_comp1 as a 
+    left join data_comp_2 as b
+    on a.permno = b.permno and a.event_date=b.event_date;
+quit;
+
+proc sort data = data_comp_3;
+by permno event_date date;
+run;
+
+
+data data_comp_4;
+  set data_comp_3;
+  by permno event_date date;
+
+  /* initialize on the first trading‐day for this event */
+  if first.event_date then reladay = -bef_sum - 1;
+
+  /* increment by 1 each row */
+  reladay + 1;
+
+  /* drop all but the essentials */
+  keep
+    permno
+    ticker
+    date
+    event_date
+    dlyret
+    Mkt
+    dlycap      /* for firm size */
+    disfacshr   /* split factor */
+    disexdt     /* actual split date (if needed) */
+    BEF_SUM     /* number of pre‐event days */
+    relday      /* relative trading‐day index */
+    reladay
+  ;
+run;
+
+proc print data=data_comp_4(obs=10); /*check*/
+where relday < 0;
+run;
+
+
+/* Build CAPM estimation sample: keep only relday ∈ [–250, –50]         */
+
+
+data capm1;
+  set work.filtered_1;
+  relday = date - event_date;
+  /* estimation window: 250 to 50 trading days before the split */
+  if relday >= -250 and relday <= -50;
+run;
+
+
+
+/* Estimate market‐model on the estimation sample                      */
+proc reg
+    data=capm1
+    outest=capm2   /* save parameter estimates */
+    noprint;
+  by permno event_date;
+  model dlyret = Mkt;
+quit;
+
+proc print data =capm2 (obs=10);
+run;
+
+/* Keep only the PARMS row, rename Intercept→alpha, Mkt→beta           */
+data capm3;
+  set capm2;
+  /* PROC REG writes two rows per BY‐group (TYPE='PARMS' and TYPE='STDERR').
+     We only want the parameter estimates (TYPE='PARMS'), so filter: */
+  where _TYPE_ = 'PARMS';
+  /* rename the estimated intercept & slope */
+  alpha = Intercept;
+  beta  = Mkt;
+  /* keep just the keys plus alpha & beta */
+  keep permno event_date alpha beta;
+run;
+
+/* Merge α and β onto the event window   */
+
+proc sort data=data_comp_4; by permno event_date; run;
+proc sort data=capm3;  by permno event_date; run;
+
+data event2;
+  merge data_comp_4 capm3;
+  by permno event_date;
+run;
+
+/* Compute abnormal returns                                            */
+data event3;
+  set event2;
+  AR = dlyret - alpha - beta * Mkt;
+  if AR ne .;
+run;
+
+proc sort data=event3;
+  by permno event_date relday;
+run;
+
+proc means data=event3 noprint;
+  by permno event_date;
+  where relday >= 0 and relday <= 10;  /* adjust as needed */
+  var AR;
+  output out=final_car sum=CAR;
+run;
+
+proc ttest data=final_car h0=0;
+  var CAR;
+run;
